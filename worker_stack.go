@@ -5,11 +5,13 @@ import "time"
 type workerStack struct {
 	items  []worker
 	expiry []worker
+	size   int
 }
 
 func newWorkerStack(size int) *workerStack {
 	return &workerStack{
 		items: make([]worker, 0, size),
+		size:  size,
 	}
 }
 
@@ -21,8 +23,12 @@ func (ws *workerStack) isEmpty() bool {
 	return len(ws.items) == 0
 }
 
-func (ws *workerStack) insert(w worker) {
+func (ws *workerStack) insert(w worker) error {
+	if ws.len() >= ws.size {
+		return nil
+	}
 	ws.items = append(ws.items, w)
+	return nil
 }
 
 func (ws *workerStack) detach() worker {
@@ -32,7 +38,6 @@ func (ws *workerStack) detach() worker {
 	}
 
 	w := ws.items[l-1]
-	ws.items[l-1] = nil
 	ws.items = ws.items[:l-1]
 
 	return w

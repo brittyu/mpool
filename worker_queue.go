@@ -5,7 +5,7 @@ import "time"
 type workerQueue interface {
 	len() int
 	isEmpty() bool
-	insert(worker)
+	insert(worker) error
 	detach() worker
 	refresh(duration time.Duration) []worker
 	reset()
