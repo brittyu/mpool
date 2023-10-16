@@ -72,13 +72,10 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		}
 	}
 
-	if p.options.PreAlloc {
-		if size == -1 {
-			return nil, ErrInvalidPreAllocSize
-		}
-		p.workers = newWorkerQueue(queueTypeLoopQueue, size)
+	if p.options.PreAlloc && size <= 0 {
+		return nil, ErrInvalidPreAllocSize
 	} else {
-		p.workers = newWorkerQueue(queueTypeStack, size)
+		p.workers = newWorkerStack(size)
 	}
 
 	p.cond = sync.NewCond(p.lock)
