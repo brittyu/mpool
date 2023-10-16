@@ -47,7 +47,3 @@ var (
 
 	defaultPool, _ = NewPool(DefaultPoolSize)
 )
-
-func Submit(task func()) error {
-	return nil
-}

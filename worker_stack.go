@@ -24,9 +24,6 @@ func (ws *workerStack) isEmpty() bool {
 }
 
 func (ws *workerStack) insert(w worker) error {
-	if ws.len() >= ws.size {
-		return nil
-	}
 	ws.items = append(ws.items, w)
 	return nil
 }

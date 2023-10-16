@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-type Pool struct {
+type PoolWithFunc struct {
 	capacity int32
 
 	// 只在开启动态调整时候有效
@@ -25,6 +25,8 @@ type Pool struct {
 
 	cond *sync.Cond
 
+	poolFunc func(interface{})
+
 	workerCache sync.Pool
 
 	waiting int32
@@ -40,9 +42,13 @@ type Pool struct {
 	options *Options
 }
 
-func NewPool(size int, options ...Option) (*Pool, error) {
+func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWithFunc, error) {
 	if size <= 0 {
 		size = -1
+	}
+
+	if pf == nil {
+		return nil, ErrLackPoolFunc
 	}
 
 	opts := loadOptions(options...)
@@ -59,26 +65,25 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		opts.Logger = defaultLogger
 	}
 
-	p := &Pool{
+	p := &PoolWithFunc{
 		capacity: int32(size),
+		poolFunc: pf,
 		lock:     slock.NewSpinLock(),
 		options:  opts,
 	}
-
 	p.workerCache.New = func() interface{} {
-		return &goWorker{
+		return &goWorkerWithFunc{
 			pool: p,
-			task: make(chan func(), workerChanCap),
+			args: make(chan interface{}, workerChanCap),
 		}
 	}
-
 	if p.options.PreAlloc {
 		if size == -1 {
 			return nil, ErrInvalidPreAllocSize
 		}
 		p.workers = newWorkerQueue(queueTypeLoopQueue, size)
 	} else {
-		p.workers = newWorkerQueue(queueTypeStack, size)
+		p.workers = newWorkerQueue(queueTypeStack, 0)
 	}
 
 	p.cond = sync.NewCond(p.lock)
@@ -87,10 +92,9 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 	p.goTicktock()
 
 	return p, nil
-
 }
 
-func (p *Pool) purgeStaleWorkers(ctx context.Context) {
+func (p *PoolWithFunc) purgeStaleWorkers(ctx context.Context) {
 	ticker := time.NewTicker(p.options.ExpiryDuration)
 
 	defer func() {
@@ -103,6 +107,10 @@ func (p *Pool) purgeStaleWorkers(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+
+		if p.IsClosed() {
+			break
 		}
 
 		var isDormant bool
@@ -123,7 +131,7 @@ func (p *Pool) purgeStaleWorkers(ctx context.Context) {
 	}
 }
 
-func (p *Pool) ticktock(ctx context.Context) {
+func (p *PoolWithFunc) ticktock(ctx context.Context) {
 	ticker := time.NewTicker(nowTimeUpdateInterval)
 
 	defer func() {
@@ -135,10 +143,8 @@ func (p *Pool) ticktock(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-		}
 
-		if p.IsClosed() {
+		case <-ticker.C:
 			break
 		}
 
@@ -146,80 +152,7 @@ func (p *Pool) ticktock(ctx context.Context) {
 	}
 }
 
-func (p *Pool) retrieveWorker() (w worker, err error) {
-	p.lock.Lock()
-
-retry:
-	if w = p.workers.detach(); w != nil {
-		p.lock.Unlock()
-		return
-	}
-
-	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
-		p.lock.Unlock()
-		w = p.workerCache.Get().(*goWorker)
-		w.run()
-		return
-	}
-
-	// 如果是堵塞 或者 等待队列大于等于设置的最大数值则判为过载
-	if p.options.NonBlocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
-		p.lock.Unlock()
-		return nil, ErrPoolOverload
-	}
-
-	p.addWaiting(1)
-	p.cond.Wait()
-	p.addWaiting(-1)
-
-	if p.IsClosed() {
-		p.lock.Unlock()
-		return nil, ErrPoolClosed
-	}
-
-	goto retry
-}
-
-func (p *Pool) revertWorker(worker *goWorker) bool {
-	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
-		p.cond.Broadcast()
-		return false
-	}
-
-	worker.lastUsed = p.nowTime()
-
-	p.lock.Unlock()
-	defer func() {
-		p.lock.Unlock()
-	}()
-
-	if p.IsClosed() {
-		return false
-	}
-
-	if err := p.workers.insert(worker); err != nil {
-		return false
-	}
-
-	p.cond.Signal()
-
-	return true
-}
-
-func (p *Pool) Submit(task func()) error {
-	if p.IsClosed() {
-		return ErrPoolClosed
-	}
-
-	w, err := p.retrieveWorker()
-	if w != nil {
-		w.inputFunc(task)
-	}
-
-	return err
-}
-
-func (p *Pool) goPurge() {
+func (p *PoolWithFunc) goPurge() {
 	if p.options.DisablePurge {
 		return
 	}
@@ -229,64 +162,74 @@ func (p *Pool) goPurge() {
 	go p.purgeStaleWorkers(ctx)
 }
 
-func (p *Pool) goTicktock() {
+func (p *PoolWithFunc) goTicktock() {
 	p.now.Store(time.Now())
 	var ctx context.Context
 	ctx, p.stopTicktock = context.WithCancel(context.Background())
 	go p.ticktock(ctx)
 }
 
-func (p *Pool) nowTime() time.Time {
+func (p *PoolWithFunc) nowTime() time.Time {
 	return p.now.Load().(time.Time)
 }
 
-func (p *Pool) Waiting() int {
-	return int(atomic.LoadInt32(&p.waiting))
+func (p *PoolWithFunc) Invoke(args interface{}) error {
+	if p.IsClosed() {
+		return ErrPoolClosed
+	}
+
+	w, err := p.retrieveWorker()
+	if w != nil {
+		w.inputParam(args)
+	}
+
+	return err
 }
 
-func (p *Pool) Cap() int {
-	return int(atomic.LoadInt32(&p.capacity))
-}
-
-func (p *Pool) Running() int {
+func (p *PoolWithFunc) Running() int {
 	return int(atomic.LoadInt32(&p.running))
 }
 
-func (p *Pool) Free() int {
+func (p *PoolWithFunc) Free() int {
 	c := p.Cap()
 	if c < 0 {
 		return -1
 	}
 
-	return c - p.Free()
+	return c - Running()
 }
 
-func (p *Pool) Reboot() {
-	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
-		atomic.StoreInt32(&p.purgeDone, 0)
-		p.goPurge()
-		atomic.StoreInt32(&p.ticktockDone, 0)
-		p.goTicktock()
-	}
+func (p *PoolWithFunc) Waiting() int {
+	return int(atomic.LoadInt32(&p.waiting))
 }
 
-func (p *Pool) Tune(size int) {
+func (p *PoolWithFunc) Cap() int {
+	return int(atomic.LoadInt32(&p.capacity))
+}
+
+func (p *PoolWithFunc) Tune(size int) {
 	capacity := p.Cap()
 	if capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
 		return
 	}
 
 	atomic.StoreInt32(&p.capacity, int32(size))
+
 	if size > capacity {
 		if size-capacity == 1 {
 			p.cond.Signal()
 			return
 		}
+
 		p.cond.Broadcast()
 	}
 }
 
-func (p *Pool) Release() {
+func (p *PoolWithFunc) IsClosed() bool {
+	return atomic.LoadInt32(&p.state) == CLOSED
+}
+
+func (p *PoolWithFunc) Release() {
 	if !atomic.CompareAndSwapInt32(&p.state, OPENED, CLOSED) {
 		return
 	}
@@ -306,7 +249,7 @@ func (p *Pool) Release() {
 	p.cond.Broadcast()
 }
 
-func (p *Pool) ReleaseTimeout(timeout time.Duration) error {
+func (p *PoolWithFunc) ReleaseTimeout(timeout time.Duration) error {
 	if p.IsClosed() || (!p.options.DisablePurge && p.stopPurge == nil) || p.stopTicktock == nil {
 		return ErrPoolClosed
 	}
@@ -320,20 +263,82 @@ func (p *Pool) ReleaseTimeout(timeout time.Duration) error {
 			atomic.LoadInt32(&p.ticktockDone) == 1 {
 			return nil
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 
 	return ErrTimeout
 }
 
-func (p *Pool) addRunning(delta int) {
+func (p *PoolWithFunc) Reboot() {
+	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
+		atomic.StoreInt32(&p.purgeDone, 0)
+		p.goPurge()
+		atomic.StoreInt32(&p.ticktockDone, 0)
+		p.goTicktock()
+	}
+}
+
+func (p *PoolWithFunc) addRunning(delta int) {
 	atomic.AddInt32(&p.running, int32(delta))
 }
 
-func (p *Pool) addWaiting(delta int) {
+func (p *PoolWithFunc) addWaiting(delta int) {
 	atomic.AddInt32(&p.waiting, int32(delta))
 }
 
-func (p *Pool) IsClosed() bool {
-	return atomic.LoadInt32(&p.state) == CLOSED
+func (p *PoolWithFunc) retrieveWorker() (w worker, err error) {
+	p.lock.Lock()
+retry:
+	if w = p.workers.detach(); w != nil {
+		p.lock.Unlock()
+		return
+	}
+
+	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
+		p.lock.Unlock()
+		w = p.workerCache.Get().(*goWorkerWithFunc)
+		w.run()
+		return
+	}
+
+	if p.options.NonBlocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
+		p.lock.Unlock()
+		return nil, ErrPoolOverload
+	}
+
+	p.addWaiting(1)
+	p.cond.Wait()
+	p.addWaiting(-1)
+
+	if p.IsClosed() {
+		p.lock.Unlock()
+		return nil, ErrPoolClosed
+	}
+
+	goto retry
+}
+
+func (p *PoolWithFunc) revertWorker(worker *goWorkerWithFunc) bool {
+	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
+		p.cond.Broadcast()
+		return false
+	}
+
+	worker.lastUsed = p.nowTime()
+
+	p.lock.Lock()
+
+	if p.IsClosed() {
+		p.lock.Unlock()
+		return false
+	}
+
+	if err := p.workers.insert(worker); err != nil {
+		p.lock.Unlock()
+		return false
+	}
+
+	p.cond.Signal()
+	p.lock.Unlock()
+
+	return true
 }
