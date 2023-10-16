@@ -77,13 +77,10 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 			args: make(chan interface{}, workerChanCap),
 		}
 	}
-	if p.options.PreAlloc {
-		if size == -1 {
-			return nil, ErrInvalidPreAllocSize
-		}
-		p.workers = newWorkerQueue(queueTypeLoopQueue, size)
+	if p.options.PreAlloc && size <= 0 {
+		return nil, ErrInvalidPreAllocSize
 	} else {
-		p.workers = newWorkerQueue(queueTypeStack, 0)
+		p.workers = newWorkerQueue(queueTypeStack, size)
 	}
 
 	p.cond = sync.NewCond(p.lock)

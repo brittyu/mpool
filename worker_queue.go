@@ -1,6 +1,8 @@
 package mpool
 
-import "time"
+import (
+	"time"
+)
 
 type queueType int
 

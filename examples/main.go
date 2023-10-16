@@ -45,7 +45,7 @@ func main() {
 	p, _ := mpool.NewPoolWithFunc(10, func(i interface{}) {
 		myFunc(i)
 		wg.Done()
-	})
+	}, mpool.WithPreAlloc(true))
 	defer p.Release()
 	// Submit tasks one by one.
 	for i := 0; i < runTimes; i++ {
