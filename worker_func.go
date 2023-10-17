@@ -1,7 +1,6 @@
 package mpool
 
 import (
-	"fmt"
 	"runtime/debug"
 	"time"
 )
@@ -19,7 +18,6 @@ func (w *goWorkerWithFunc) run() {
 
 	go func() {
 		defer func() {
-			fmt.Println("log")
 			w.pool.addRunning(-1)
 			w.pool.workerCache.Put(w)
 
@@ -30,7 +28,6 @@ func (w *goWorkerWithFunc) run() {
 					w.pool.options.Logger.Printf("worker exit from panic: %v\n%s\n", p, debug.Stack())
 				}
 			}
-			fmt.Println("signal")
 			w.pool.cond.Signal()
 		}()
 
