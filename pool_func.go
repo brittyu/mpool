@@ -284,21 +284,23 @@ func (p *PoolWithFunc) addWaiting(delta int) {
 
 func (p *PoolWithFunc) retrieveWorker() (w worker, err error) {
 	p.lock.Lock()
+
+	defer func() {
+		p.lock.Unlock()
+	}()
+
 retry:
 	if w = p.workers.detach(); w != nil {
-		p.lock.Unlock()
 		return
 	}
 
 	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
-		p.lock.Unlock()
 		w = p.workerCache.Get().(*goWorkerWithFunc)
 		w.run()
 		return
 	}
 
 	if p.options.NonBlocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
-		p.lock.Unlock()
 		return nil, ErrPoolOverload
 	}
 
@@ -307,7 +309,6 @@ retry:
 	p.addWaiting(-1)
 
 	if p.IsClosed() {
-		p.lock.Unlock()
 		return nil, ErrPoolClosed
 	}
 
@@ -324,18 +325,19 @@ func (p *PoolWithFunc) revertWorker(worker *goWorkerWithFunc) bool {
 
 	p.lock.Lock()
 
-	if p.IsClosed() {
+	defer func() {
 		p.lock.Unlock()
+	}()
+
+	if p.IsClosed() {
 		return false
 	}
 
 	if err := p.workers.insert(worker); err != nil {
-		p.lock.Unlock()
 		return false
 	}
 
 	p.cond.Signal()
-	p.lock.Unlock()
 
 	return true
 }

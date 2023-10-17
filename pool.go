@@ -146,14 +146,16 @@ func (p *Pool) ticktock(ctx context.Context) {
 func (p *Pool) retrieveWorker() (w worker, err error) {
 	p.lock.Lock()
 
+	defer func() {
+		p.lock.Unlock()
+	}()
+
 retry:
 	if w = p.workers.detach(); w != nil {
-		p.lock.Unlock()
 		return
 	}
 
 	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
-		p.lock.Unlock()
 		w = p.workerCache.Get().(*goWorker)
 		w.run()
 		return
@@ -161,7 +163,6 @@ retry:
 
 	// 如果是堵塞 或者 等待队列大于等于设置的最大数值则判为过载
 	if p.options.NonBlocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
-		p.lock.Unlock()
 		return nil, ErrPoolOverload
 	}
 
@@ -170,7 +171,6 @@ retry:
 	p.addWaiting(-1)
 
 	if p.IsClosed() {
-		p.lock.Unlock()
 		return nil, ErrPoolClosed
 	}
 
