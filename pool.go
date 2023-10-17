@@ -12,8 +12,8 @@ type Pool struct {
 	capacity int32
 
 	// 只在开启动态调整时候有效
-	minCapacity int32
-	maxCapacity int32
+	dynamicMin int
+	dynamicMax int
 
 	running int32
 
@@ -59,10 +59,20 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		opts.Logger = defaultLogger
 	}
 
+	if opts.Dynamic && (opts.DynamicMin == 0 || opts.DynamicMax == 0) {
+		opts.DynamicMin = defaultDynamicMin
+		opts.DynamicMax = defaultDynamicMax
+	}
+
 	p := &Pool{
 		capacity: int32(size),
 		lock:     slock.NewSpinLock(),
 		options:  opts,
+	}
+
+	if opts.Dynamic {
+		p.dynamicMin = opts.DynamicMin
+		p.dynamicMax = opts.DynamicMax
 	}
 
 	p.workerCache.New = func() interface{} {
@@ -72,8 +82,8 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		}
 	}
 
-	if p.options.PreAlloc && size <= 0 {
-		return nil, ErrInvalidPreAllocSize
+	if size <= 0 {
+		return nil, ErrInvalidSize
 	} else {
 		p.workers = newWorkerStack(size)
 	}
@@ -145,18 +155,20 @@ func (p *Pool) ticktock(ctx context.Context) {
 
 func (p *Pool) retrieveWorker() (w worker, err error) {
 	p.lock.Lock()
-
-	defer func() {
-		p.lock.Unlock()
-	}()
+	defer p.lock.Unlock()
 
 retry:
 	if w = p.workers.detach(); w != nil {
 		return
 	}
 
-	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
+	if capacity := p.Cap(); capacity > p.Running() || (p.options.Dynamic && capacity < p.dynamicMax) {
 		w = p.workerCache.Get().(*goWorker)
+
+		if capacity <= p.Running() && p.options.Dynamic && capacity < p.dynamicMax {
+			atomic.StoreInt32(&p.capacity, int32(capacity)+1)
+		}
+
 		w.run()
 		return
 	}
@@ -177,18 +189,18 @@ retry:
 	goto retry
 }
 
+// 把worker添加到池中
 func (p *Pool) revertWorker(worker *goWorker) bool {
-	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
+	if capacity := p.Cap(); (p.Running() < capacity && p.options.Dynamic && capacity > p.dynamicMin) || p.IsClosed() {
 		p.cond.Broadcast()
+		atomic.StoreInt32(&p.capacity, int32(capacity)-1)
 		return false
 	}
 
 	worker.lastUsed = p.nowTime()
 
-	p.lock.Unlock()
-	defer func() {
-		p.lock.Unlock()
-	}()
+	p.lock.Lock()
+	defer p.lock.Unlock()
 
 	if p.IsClosed() {
 		return false
@@ -264,22 +276,6 @@ func (p *Pool) Reboot() {
 		p.goPurge()
 		atomic.StoreInt32(&p.ticktockDone, 0)
 		p.goTicktock()
-	}
-}
-
-func (p *Pool) Tune(size int) {
-	capacity := p.Cap()
-	if capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
-		return
-	}
-
-	atomic.StoreInt32(&p.capacity, int32(size))
-	if size > capacity {
-		if size-capacity == 1 {
-			p.cond.Signal()
-			return
-		}
-		p.cond.Broadcast()
 	}
 }
 

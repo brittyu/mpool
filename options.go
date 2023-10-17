@@ -7,8 +7,6 @@ import (
 type Options struct {
 	ExpiryDuration time.Duration
 
-	PreAlloc bool
-
 	MaxBlockingTasks int
 
 	NonBlocking bool
@@ -19,7 +17,9 @@ type Options struct {
 
 	DisablePurge bool
 
-	Dynamic bool
+	Dynamic    bool
+	DynamicMin int
+	DynamicMax int
 }
 
 type Option func(opts *Options)
@@ -42,12 +42,6 @@ func WithOptions(options Options) Option {
 func WithExpiryDuraction(expiryDuration time.Duration) Option {
 	return func(opts *Options) {
 		opts.ExpiryDuration = expiryDuration
-	}
-}
-
-func WithPreAlloc(preAlloc bool) Option {
-	return func(opts *Options) {
-		opts.PreAlloc = preAlloc
 	}
 }
 
@@ -84,5 +78,17 @@ func WithDisablePurge(disable bool) Option {
 func WithDynamic(dynamic bool) Option {
 	return func(opts *Options) {
 		opts.Dynamic = dynamic
+	}
+}
+
+func WithDynamicMin(dynamicMin int) Option {
+	return func(opts *Options) {
+		opts.DynamicMin = dynamicMin
+	}
+}
+
+func WithDynamicMax(dynamicMax int) Option {
+	return func(opts *Options) {
+		opts.DynamicMax = dynamicMax
 	}
 }

@@ -27,12 +27,12 @@ const (
 const nowTimeUpdateInterval = 500 * time.Millisecond
 
 var (
-	ErrLackPoolFunc        = errors.New("must provide function for pool")
-	ErrInvalidPoolExpiry   = errors.New("invalid expiry for pool")
-	ErrPoolClosed          = errors.New("pool has been closed")
-	ErrPoolOverload        = errors.New("too many goroutines blocked")
-	ErrInvalidPreAllocSize = errors.New("can not set up a negative capacity under preAlloc mode")
-	ErrTimeout             = errors.New("operation timeout")
+	ErrLackPoolFunc      = errors.New("must provide function for pool")
+	ErrInvalidPoolExpiry = errors.New("invalid expiry for pool")
+	ErrPoolClosed        = errors.New("pool has been closed")
+	ErrPoolOverload      = errors.New("too many goroutines blocked")
+	ErrInvalidSize       = errors.New("can not set up a negative capacity")
+	ErrTimeout           = errors.New("operation timeout")
 
 	workerChanCap = func() int {
 		if runtime.GOMAXPROCS(0) == 1 {
@@ -46,4 +46,7 @@ var (
 	defaultLogger = Logger(log.New(os.Stderr, "[mpool]: ", log.LstdFlags|logLmsgprefix|log.Lmicroseconds))
 
 	defaultPool, _ = NewPool(DefaultPoolSize)
+
+	defaultDynamicMin = 10
+	defaultDynamicMax = 100
 )

@@ -12,8 +12,8 @@ type PoolWithFunc struct {
 	capacity int32
 
 	// 只在开启动态调整时候有效
-	minCapacity int32
-	maxCapacity int32
+	dynamicMin int
+	dynamicMax int
 
 	running int32
 
@@ -65,20 +65,31 @@ func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWi
 		opts.Logger = defaultLogger
 	}
 
+	if opts.Dynamic && (opts.DynamicMin == 0 || opts.DynamicMax == 0) {
+		opts.DynamicMin = defaultDynamicMin
+		opts.DynamicMax = defaultDynamicMax
+	}
+
 	p := &PoolWithFunc{
 		capacity: int32(size),
 		poolFunc: pf,
 		lock:     slock.NewSpinLock(),
 		options:  opts,
 	}
+
+	if opts.Dynamic {
+		p.dynamicMin = opts.DynamicMin
+		p.dynamicMax = opts.DynamicMax
+	}
+
 	p.workerCache.New = func() interface{} {
 		return &goWorkerWithFunc{
 			pool: p,
 			args: make(chan interface{}, workerChanCap),
 		}
 	}
-	if p.options.PreAlloc && size <= 0 {
-		return nil, ErrInvalidPreAllocSize
+	if size <= 0 {
+		return nil, ErrInvalidSize
 	} else {
 		p.workers = newWorkerQueue(size)
 	}
@@ -204,24 +215,6 @@ func (p *PoolWithFunc) Cap() int {
 	return int(atomic.LoadInt32(&p.capacity))
 }
 
-func (p *PoolWithFunc) Tune(size int) {
-	capacity := p.Cap()
-	if capacity == -1 || size <= 0 || size == capacity || p.options.PreAlloc {
-		return
-	}
-
-	atomic.StoreInt32(&p.capacity, int32(size))
-
-	if size > capacity {
-		if size-capacity == 1 {
-			p.cond.Signal()
-			return
-		}
-
-		p.cond.Broadcast()
-	}
-}
-
 func (p *PoolWithFunc) IsClosed() bool {
 	return atomic.LoadInt32(&p.state) == CLOSED
 }
@@ -284,22 +277,26 @@ func (p *PoolWithFunc) addWaiting(delta int) {
 
 func (p *PoolWithFunc) retrieveWorker() (w worker, err error) {
 	p.lock.Lock()
-
-	defer func() {
-		p.lock.Unlock()
-	}()
+	defer p.lock.Unlock()
 
 retry:
 	if w = p.workers.detach(); w != nil {
 		return
 	}
-
-	if capacity := p.Cap(); capacity == -1 || capacity > p.Running() {
+	// fmt.Println(p.options.Dynamic)
+	// fmt.Println(p.dynamicMax)
+	if capacity := p.Cap(); capacity > p.Running() || (p.options.Dynamic && capacity < p.dynamicMax) {
 		w = p.workerCache.Get().(*goWorkerWithFunc)
+
+		if capacity <= p.Running() && p.options.Dynamic && capacity < p.dynamicMax {
+			atomic.StoreInt32(&p.capacity, int32(capacity)+1)
+		}
+
 		w.run()
 		return
 	}
 
+	// 如果是堵塞 或者 等待队列大于等于设置的最大数值则判为过载
 	if p.options.NonBlocking || (p.options.MaxBlockingTasks != 0 && p.Waiting() >= p.options.MaxBlockingTasks) {
 		return nil, ErrPoolOverload
 	}
@@ -316,18 +313,16 @@ retry:
 }
 
 func (p *PoolWithFunc) revertWorker(worker *goWorkerWithFunc) bool {
-	if capacity := p.Cap(); (capacity > 0 && p.Running() > capacity) || p.IsClosed() {
+	if capacity := p.Cap(); (p.Running() < capacity && p.options.Dynamic && capacity > p.dynamicMin) || p.IsClosed() {
 		p.cond.Broadcast()
+		atomic.StoreInt32(&p.capacity, int32(capacity)-1)
 		return false
 	}
 
 	worker.lastUsed = p.nowTime()
 
 	p.lock.Lock()
-
-	defer func() {
-		p.lock.Unlock()
-	}()
+	defer p.lock.Unlock()
 
 	if p.IsClosed() {
 		return false
