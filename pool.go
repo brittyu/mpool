@@ -1,43 +1,13 @@
 package mpool
 
 import (
-	"context"
 	"mpool/lib/slock"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 type Pool struct {
-	capacity int32
-
-	// 只在开启动态调整时候有效
-	dynamicMin int
-	dynamicMax int
-
-	running int32
-
-	lock sync.Locker
-
-	workers workerQueue
-
-	state int32
-
-	cond *sync.Cond
-
-	workerCache sync.Pool
-
-	waiting int32
-
-	purgeDone int32
-	stopPurge context.CancelFunc
-
-	ticktockDone int32
-	stopTicktock context.CancelFunc
-
-	now atomic.Value
-
-	options *Options
+	*CommonPool
 }
 
 func NewPool(size int, options ...Option) (*Pool, error) {
@@ -64,10 +34,14 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 		opts.DynamicMax = defaultDynamicMax
 	}
 
-	p := &Pool{
+	commonPool := &CommonPool{
 		capacity: int32(size),
 		lock:     slock.NewSpinLock(),
 		options:  opts,
+	}
+
+	p := &Pool{
+		commonPool,
 	}
 
 	if opts.Dynamic {
@@ -95,62 +69,6 @@ func NewPool(size int, options ...Option) (*Pool, error) {
 
 	return p, nil
 
-}
-
-func (p *Pool) purgeStaleWorkers(ctx context.Context) {
-	ticker := time.NewTicker(p.options.ExpiryDuration)
-
-	defer func() {
-		ticker.Stop()
-		atomic.StoreInt32(&p.purgeDone, 1)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		var isDormant bool
-		p.lock.Lock()
-		staleWorkers := p.workers.refresh(p.options.ExpiryDuration)
-		n := p.Running()
-		isDormant = n == 0 || n == len(staleWorkers)
-		p.lock.Unlock()
-
-		for i := range staleWorkers {
-			staleWorkers[i].finish()
-			staleWorkers[i] = nil
-		}
-
-		if isDormant && p.Waiting() > 0 {
-			p.cond.Broadcast()
-		}
-	}
-}
-
-func (p *Pool) ticktock(ctx context.Context) {
-	ticker := time.NewTicker(nowTimeUpdateInterval)
-
-	defer func() {
-		ticker.Stop()
-		atomic.StoreInt32(&p.ticktockDone, 1)
-	}()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		if p.IsClosed() {
-			break
-		}
-
-		p.now.Store(time.Now())
-	}
 }
 
 func (p *Pool) retrieveWorker() (w worker, err error) {
@@ -226,107 +144,4 @@ func (p *Pool) Submit(task func()) error {
 	}
 
 	return err
-}
-
-func (p *Pool) goPurge() {
-	if p.options.DisablePurge {
-		return
-	}
-
-	var ctx context.Context
-	ctx, p.stopPurge = context.WithCancel(context.Background())
-	go p.purgeStaleWorkers(ctx)
-}
-
-func (p *Pool) goTicktock() {
-	p.now.Store(time.Now())
-	var ctx context.Context
-	ctx, p.stopTicktock = context.WithCancel(context.Background())
-	go p.ticktock(ctx)
-}
-
-func (p *Pool) nowTime() time.Time {
-	return p.now.Load().(time.Time)
-}
-
-func (p *Pool) Waiting() int {
-	return int(atomic.LoadInt32(&p.waiting))
-}
-
-func (p *Pool) Cap() int {
-	return int(atomic.LoadInt32(&p.capacity))
-}
-
-func (p *Pool) Running() int {
-	return int(atomic.LoadInt32(&p.running))
-}
-
-func (p *Pool) Free() int {
-	c := p.Cap()
-	if c < 0 {
-		return -1
-	}
-
-	return c - p.Free()
-}
-
-func (p *Pool) Reboot() {
-	if atomic.CompareAndSwapInt32(&p.state, CLOSED, OPENED) {
-		atomic.StoreInt32(&p.purgeDone, 0)
-		p.goPurge()
-		atomic.StoreInt32(&p.ticktockDone, 0)
-		p.goTicktock()
-	}
-}
-
-func (p *Pool) Release() {
-	if !atomic.CompareAndSwapInt32(&p.state, OPENED, CLOSED) {
-		return
-	}
-
-	if p.stopPurge != nil {
-		p.stopPurge()
-		p.stopPurge = nil
-	}
-
-	p.stopTicktock()
-	p.stopTicktock = nil
-
-	p.lock.Lock()
-	p.workers.reset()
-	p.lock.Unlock()
-
-	p.cond.Broadcast()
-}
-
-func (p *Pool) ReleaseTimeout(timeout time.Duration) error {
-	if p.IsClosed() || (!p.options.DisablePurge && p.stopPurge == nil) || p.stopTicktock == nil {
-		return ErrPoolClosed
-	}
-
-	p.Release()
-
-	endTime := time.Now().Add(timeout)
-	for time.Now().Before(endTime) {
-		if p.Running() == 0 &&
-			(p.options.DisablePurge || atomic.LoadInt32(&p.purgeDone) == 1) &&
-			atomic.LoadInt32(&p.ticktockDone) == 1 {
-			return nil
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	return ErrTimeout
-}
-
-func (p *Pool) addRunning(delta int) {
-	atomic.AddInt32(&p.running, int32(delta))
-}
-
-func (p *Pool) addWaiting(delta int) {
-	atomic.AddInt32(&p.waiting, int32(delta))
-}
-
-func (p *Pool) IsClosed() bool {
-	return atomic.LoadInt32(&p.state) == CLOSED
 }
