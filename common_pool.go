@@ -125,6 +125,9 @@ func (p *CommonPool) ticktock(ctx context.Context) {
 			return
 
 		case <-ticker.C:
+		}
+
+		if p.IsClosed() {
 			break
 		}
 
