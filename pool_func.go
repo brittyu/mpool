@@ -10,6 +10,10 @@ type PoolWithFunc struct {
 	*CommonPool
 }
 
+func newWorkerQueue(size int) workerQueue {
+	return newWorkerStack(size)
+}
+
 func NewPoolWithFunc(size int, pf func(interface{}), options ...Option) (*PoolWithFunc, error) {
 	if size <= 0 {
 		size = -1

@@ -15,11 +15,6 @@ const (
 )
 
 const (
-	queueTypeStack queueType = 1 << iota
-	queueTypeLoopQueue
-)
-
-const (
 	OPENED = iota
 	CLOSED
 )
