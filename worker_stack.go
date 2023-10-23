@@ -45,6 +45,7 @@ func (ws *workerStack) detach() worker {
 
 	w := ws.items[l-1]
 	ws.items = ws.items[:l-1]
+	ws.items[l-1] = nil
 
 	return w
 }
@@ -62,6 +63,9 @@ func (ws *workerStack) refresh(duration time.Duration) []worker {
 	if index != -1 {
 		ws.expiry = append(ws.expiry, ws.items[:index+1]...)
 		m := copy(ws.items, ws.items[index+1:])
+		for i := m; i < l; i++ {
+			ws.items[i] = nil
+		}
 		ws.items = ws.items[:m]
 	}
 
